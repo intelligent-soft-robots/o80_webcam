@@ -1,3 +1,10 @@
+"""
+Connects to the usb camera at index 0, creates corresponding o80 standalone, 
+and connects to it via an o80 backend. The backend is used to read the 
+image array from the shared memory and display it in an opencv window.
+Runs for 20 seconds then exits.
+"""
+
 import cv2
 import numpy as np
 import time

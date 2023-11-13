@@ -3,7 +3,7 @@ import numpy as np
 import time
 import o80_webcam as cam
 
-frequency = 50
+frequency = 100
 camera_index = 0
 duration = 20
 segment_id = "o80_webcam_demo"
@@ -16,11 +16,9 @@ time_start = time.time()
 
 while time.time() - time_start < duration:
     obs = frontend.wait_for_next()
-    es = obs.get_extended_state()
-    frame = es.get()
-    dims = es.dimensions()
-    data = np.array(frame, dtype=np.uint8)
-    img = data.reshape(dims)
+    frame = obs.get_frame()
+    dimensions = obs.get_dimensions()
+    img = np.array(frame, dtype=np.uint8).reshape(dimensions)
     cv2.imshow("o80_webcam_demo", img)
     cv2.waitKey(1)
 

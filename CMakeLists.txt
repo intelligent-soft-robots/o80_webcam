@@ -63,6 +63,14 @@ _ament_cmake_python_get_python_install_dir()
 install(TARGETS ${PROJECT_NAME}_py DESTINATION ${PYTHON_INSTALL_DIR})
 
 
+###############
+# Executables #
+###############
+
+configure_file(${CMAKE_CURRENT_LIST_DIR}/bin/o80_webcams
+  ${CMAKE_INSTALL_PREFIX}/bin/o80_webcams COPYONLY)
+
+
 ######################
 # Install and export #
 ######################

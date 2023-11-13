@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+
+"""
+Executable for starting o80 webcam standalones.
+The command line arguments allows to select the list of usb camera indexes. If no index is 
+provided, a standalone will be started for all detected webcams.
+At startup, the standalone segment ids are printed in the terminal. You can use them
+to create corresponding frontend:
+
+```
+import o80_webcam
+frontend = o80_webcam.FrontEnd(segment_id)
+observation = frontend.latest()
+frame, dimensions = observation.get()
+data = np.array(frame, dtype=np.uint8)
+img = data.reshape(dimensions)
+``` 
+"""
+
+import signal
+import sys
+import os
+import o80_webcam
+import contextlib
+import time
+import numpy as np
+import cv2
+import argparse
+from typing import List, cast, Tuple, Dict, Generator
+
+
+class _Config:
+    """
+    Executable configuration:
+    indexes: indexes of the webcams for which a o80 standalone
+      should be started.
+    frequency is frequencies of the standalones
+      Warning: This does not change the frame rates of the webcams ! Only the frequencies
+      at which the o80 backends will "read" images will change.
+    display: if True, the images captured by the webcams will be displayed
+    turnover: to avoid clutter, the images of all webcames are displayed in turns
+      in a single windows, according to this turnover value (in seconds)
+    """
+
+    def __init__(self) -> None:
+        self.indexes: List[int] = []
+        self.frequency: float = 50.0
+        self.display: bool = True
+        self.turnover: float = 4.0
+
+
+@contextlib.contextmanager
+def _suppress_stdout():
+    """
+    opencv2 has sometimes annoying stdout.
+    This will suppress them
+    """
+    original_stdout_fd = os.dup(sys.stdout.fileno())
+    original_stderr_fd = os.dup(sys.stderr.fileno())
+    with open(os.devnull, "w") as fp:
+        # no annoying std output
+        os.dup2(fp.fileno(), os.sys.stdout.fileno())
+        os.dup2(fp.fileno(), os.sys.stderr.fileno())
+    yield
+    os.dup2(original_stdout_fd, sys.stdout.fileno())
+    os.dup2(original_stderr_fd, sys.stderr.fileno())
+    os.close(original_stdout_fd)
+    os.close(original_stderr_fd)
+
+
+def _list_camera_indexes(max_index: int = 20) -> List[int]:
+    """
+    Returns a list of indexes of the cameras that are available.
+    max_index: Maximum range of indexes to check.
+    """
+    with _suppress_stdout():
+        available_cameras = []
+        for index in range(max_index):
+            cap = cv2.VideoCapture(index)
+            if cap.isOpened():
+                available_cameras.append(index)
+            cap.release()
+
+        return available_cameras
+
+
+def _arguments() -> _Config:
+    """
+    Generate an instance of _Config based on the arguments passed by the
+    user
+    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "indexes", metavar="indexes", type=int, nargs="*", help="list of camera indexes"
+    )
+    parser.add_argument(
+        "--frequency",
+        type=float,
+        default=50,
+        help="standalones frequencies (default 50hz) -- does NOT change the camera framerate",
+    )
+    parser.add_argument(
+        "-no-display",
+        action="store_true",
+        help="do not display the images if specified",
+    )
+    parser.add_argument(
+        "--turnover",
+        type=float,
+        default=4,
+        help="period at which the display switches from one webcam to the other",
+    )
+
+    args = parser.parse_args()
+
+    config = _Config()
+    if args.indexes:
+        config.indexes = args.indexes
+    else:
+        config.indexes = _list_camera_indexes()
+    config.display = not args.no_display
+    config.frequency = args.frequency
+    config.turnover = args.turnover
+
+    return config
+
+
+@contextlib.contextmanager
+def _start_standalones(
+    indexes: List[int], frequency: float
+) -> Generator[List[str], None, None]:
+    """
+    Context manager that starts the webcam standalones of the corresponding indexes,
+    and yields the corresponding segment_ids.
+    The standalones are stopped when the context exited.
+    """
+    segment_ids: Dict[int, str] = {index: f"o80_webcam_{index}" for index in indexes}
+    bursting_mode = False
+
+    errors: Dict[int, str] = {}
+
+    print()
+
+    for index, segment_id in segment_ids.items():
+        print("starting standalone for camera", index)
+        with _suppress_stdout():
+            try:
+                o80_webcam.start_standalone(segment_id, frequency, bursting_mode, index)
+            except Exception as e:
+                errors[index] = str(e)
+                break
+
+    if errors:
+        error_message = "failed to create standalone(s):\n" + "\n".join(
+            [f"camera {index}: {error}" for index, error in errors.items()]
+        )
+        raise RuntimeError(error_message)
+    yield list(segment_ids.values())
+    for index, segment_id in segment_ids.items():
+        o80_webcam.stop_standalone(segment_id)
+    return
+
+
+def _display_images(segment_ids: List[str], frequency: float, turnover: float) -> None:
+    """
+    Display in an opencv windows the images captures by the camera as read by the
+    o80 frontends. The images are displayed in turn, switching from one webcam to
+    the other based on the turnover argument (seconds)
+    """
+    print("\nclose the window to exit (or press 'q' with the window selected)\n")
+    frontends = [o80_webcam.FrontEnd(segment_id) for segment_id in segment_ids]
+    index = 0
+    time_start = time.time()
+    while True:
+        if time.time() - time_start > turnover:
+            time_start = time.time()
+            index = (index + 1) if index < (len(segment_ids) - 1) else 0
+        observation = frontends[index].latest()
+        frame = observation.get_frame()
+        dimensions = observation.get_dimensions()
+        img = np.array(frame, dtype=np.uint8).reshape(dimensions)
+        cv2.imshow("o80 webcams", img)
+        if (
+            cv2.waitKey(1) & 0xFF == ord("q")
+            or cv2.getWindowProperty("o80 webcams", cv2.WND_PROP_VISIBLE) < 1
+        ):
+            break
+        time.sleep(1.0 / frequency)
+    cv2.destroyAllWindows()
+
+
+def _execute():
+    config = _arguments()
+    with _start_standalones(config.indexes, config.frequency) as segment_ids:
+        if not segment_ids:
+            print("\nno webcam detected\n")
+            return
+        print("\n-- started standalones with segment_ids --")
+        for segment_id in segment_ids:
+            print(segment_id)
+        print()
+        if config.display:
+            _display_images(segment_ids, config.frequency, config.turnover)
+            return
+
+        def _signal_handler(signal_, frame):
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _signal_handler)
+
+        print("\nctrl+c to exit\n")
+
+        while True:
+            time.sleep(1.0 / config.frequency)
+
+
+if __name__ == "__main__":
+    try:
+        _execute()
+    except Exception as e:
+        print("\nerror:", e, "\n")
